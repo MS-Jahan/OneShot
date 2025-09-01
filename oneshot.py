@@ -436,6 +436,7 @@ class Companion:
 
         self.bssid = bssid
         self.lastPwr = 0
+        self.association_attempts = 0
 
     def __init_wpa_supplicant(self):
         print('[*] Running wpa_supplicant…')
@@ -478,6 +479,9 @@ class Companion:
             self.wpas.wait()
             return False
         line = line.rstrip('\n')
+
+        if any(keyword in line.lower() for keyword in ['fail', 'error', 'denied', 'unable']):
+            print(f"[!] Possible error from wpa_supplicant: {line}")
 
         if verbose:
             sys.stderr.write(line + '\n')
@@ -552,6 +556,7 @@ class Companion:
                 self.connection_status.essid = codecs.decode("'".join(line.split("'")[1:-1]), 'unicode-escape').encode('latin1').decode('utf-8', errors='replace')
             self.__print_with_indicators('*', 'Associating with AP…')
         elif ('Associated with' in line) and (self.interface in line):
+            self.association_attempts += 1
             bssid = line.split()[-1].upper()
             if self.connection_status.essid:
                 self.__print_with_indicators('+', 'Associated with {} (ESSID: {})'.format(bssid, self.connection_status.essid))
@@ -661,6 +666,7 @@ class Companion:
             verbose = self.print_debug
         self.pixie_creds.clear()
         self.connection_status.clear()
+        self.association_attempts = 0
         self.wpas.stdout.read(300)   # Clean the pipe
         if pbc_mode:
             if bssid:
@@ -680,6 +686,11 @@ class Companion:
             return False
 
         while True:
+            if self.association_attempts > 5:
+                print('[-] Too many association attempts. Maybe the AP is out of range.')
+                self.connection_status.status = 'WPS_FAIL'
+                break
+
             res = self.__handle_wpas(pixiemode=pixiemode, pbc_mode=pbc_mode, verbose=verbose, bssid=bssid.lower())
             if not res:
                 break
@@ -689,6 +700,9 @@ class Companion:
                 break
             elif self.connection_status.status == 'WPS_FAIL':
                 break
+
+        if self.wpas.poll() is not None and self.wpas.returncode != 0:
+            print(f"[-] wpa_supplicant terminated unexpectedly with exit code {self.wpas.returncode}")
 
         self.sendOnly('WPS_CANCEL')
         return False
