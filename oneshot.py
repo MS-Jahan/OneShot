@@ -434,11 +434,12 @@ class BruteforceStatus:
 
 class Companion:
     """Main application part"""
-    def __init__(self, interface, save_result=False, print_debug=False, bssid='', save_location=False):
+    def __init__(self, interface, save_result=False, print_debug=False, bssid='', save_location=False, attempt_timeout=30.0):
         self.interface = interface
         self.save_result = save_result
         self.print_debug = print_debug
         self.save_location = save_location
+        self.attempt_timeout = attempt_timeout
 
         self.tempdir = tempfile.mkdtemp()
         with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
@@ -711,8 +712,14 @@ class Companion:
             self.connection_status.status = 'WPS_FAIL'
             print(self._explain_wpas_not_ok_status(cmd, r))
             return False
-
+        
+        start_time = time.time()
         while True:
+            if time.time() - start_time > self.attempt_timeout:
+                print(f"[-] Timed out after {self.attempt_timeout} seconds.")
+                self.connection_status.status = 'WPS_FAIL'
+                break
+                
             res = self.__handle_wpas(pixiemode=pixiemode, pbc_mode=pbc_mode, verbose=verbose, bssid=bssid.lower())
             if not res:
                 break
@@ -1218,7 +1225,7 @@ def auto_attack_mode(args):
 
             for target in prioritized_targets:
                 print(f"[*] Attacking {target['essid']} ({target['bssid']})")
-                companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'], save_location=args.location)
+                companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'], save_location=args.location, attempt_timeout=args.attempt_time)
                 if companion.single_connection(bssid=target['bssid'], pixiemode=True, showpixiecmd=args.show_pixie_cmd, pixieforce=args.pixie_force):
                     print(f"[+] Successfully attacked {target['essid']}. Credentials saved.")
                     stored_networks.add(target['bssid'])
@@ -1425,6 +1432,12 @@ if __name__ == '__main__':
         help='Reverse order of networks in the list of networks. Useful on small displays'
     )
     parser.add_argument(
+        '-T', '--attempt-time',
+        type=float,
+        default=30.0,
+        help='Set the timeout for each connection attempt in seconds [30.0]'
+    )
+    parser.add_argument(
         '--mtk-wifi',
         action='store_true',
         help='Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit '
@@ -1471,7 +1484,7 @@ if __name__ == '__main__':
     else:
         while True:
             try:
-                companion = Companion(args.interface, args.write, print_debug=args.verbose, save_location=args.location)
+                companion = Companion(args.interface, args.write, print_debug=args.verbose, save_location=args.location, attempt_timeout=args.attempt_time)
                 if args.pbc:
                     companion.single_connection(pbc_mode=True)
                 else:
@@ -1487,7 +1500,7 @@ if __name__ == '__main__':
                         args.bssid = scanner.prompt_network()
 
                     if args.bssid:
-                        companion = Companion(args.interface, args.write, print_debug=args.verbose, save_location=args.location)
+                        companion = Companion(args.interface, args.write, print_debug=args.verbose, save_location=args.location, attempt_timeout=args.attempt_time)
                         if args.bruteforce:
                             companion.smart_bruteforce(args.bssid, args.pin, args.delay)
                         else:
