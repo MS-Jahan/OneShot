@@ -835,11 +835,16 @@ class Companion:
         print('[{}] [{}] {}'.format(level, self.lastPwr, msg))
 
     def cleanup(self):
-        self.retsock.close()
-        self.wpas.terminate()
-        os.remove(self.res_socket_file)
-        shutil.rmtree(self.tempdir, ignore_errors=True)
-        os.remove(self.tempconf)
+        try:
+            print("[*] Cleaning up resources...")
+            self.retsock.close()
+            self.wpas.terminate()
+            os.remove(self.res_socket_file)
+            shutil.rmtree(self.tempdir, ignore_errors=True) 
+            os.remove(self.tempconf)
+        except (OSError, FileNotFoundError) as e:
+            print(f"[!] Error during cleanup: {str(e)}")
+            pass
 
     def __del__(self):
         #self.cleanup()
@@ -1182,7 +1187,7 @@ def auto_attack_mode(args):
                     stored_networks.add(target['bssid'])
                 else:
                     print(f"[-] Attack on {target['essid']} failed.")
-                companion.cleanup()
+                # companion.cleanup()
                 time.sleep(5) # Brief pause between attacks
 
         except KeyboardInterrupt:
