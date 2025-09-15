@@ -719,7 +719,7 @@ class Companion:
                 print(f"[-] Timed out after {self.attempt_timeout} seconds.")
                 self.connection_status.status = 'WPS_FAIL'
                 break
-                
+
             res = self.__handle_wpas(pixiemode=pixiemode, pbc_mode=pbc_mode, verbose=verbose, bssid=bssid.lower())
             if not res:
                 break
@@ -1283,7 +1283,7 @@ def print_termux_location_guide():
         apps during a long scan, find the "Battery usage" setting for
         both apps and set it to "Unrestricted".
 
-    This message will only be shown once. Starting in 5 seconds...
+    Starting in 5 seconds...
     ---------------------------------------------------------------------
     """
     print(guide_message)
