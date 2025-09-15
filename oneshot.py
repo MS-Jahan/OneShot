@@ -17,6 +17,7 @@ import csv
 from pathlib import Path
 from typing import Dict
 import wcwidth
+import threading
 
 # --- Globals for Background Location Thread ---
 location_data = {"latitude": None, "longitude": None, "timestamp": 0}
