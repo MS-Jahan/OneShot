@@ -18,6 +18,34 @@ from pathlib import Path
 from typing import Dict
 import wcwidth
 
+# --- Globals for Background Location Thread ---
+location_data = {"latitude": None, "longitude": None, "timestamp": 0}
+location_lock = threading.Lock()
+stop_event = threading.Event()
+
+def location_updater_thread():
+    """
+    A thread that runs in the background, continuously polling for GPS location
+    and updating the global location_data dictionary.
+    """
+    while not stop_event.is_set():
+        try:
+            result = subprocess.run(
+                ['termux-location', '-p', 'gps', '-r', 'once'],
+                capture_output=True, text=True, timeout=20
+            )
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                with location_lock:
+                    location_data['latitude'] = data.get('latitude')
+                    location_data['longitude'] = data.get('longitude')
+                    location_data['timestamp'] = time.time()
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+            # Ignore errors, the loop will just try again later
+            pass
+        
+        # Wait 10 seconds before the next poll
+        stop_event.wait(10)
 
 class NetworkAddress:
     def __init__(self, mac):
@@ -1206,32 +1234,25 @@ def auto_attack_mode(args):
 
 def get_gps_location():
     """
-    Retrieves GPS coordinates using the Termux API.
-    Returns (latitude, longitude) or (None, None) on failure.
+    Retrieves the most recent GPS coordinates gathered by the background thread.
+    Returns (latitude, longitude) or (None, None) if no recent data is available.
     """
-    try:
-        # Request a single, accurate GPS reading. Times out after 15 seconds.
-        result = subprocess.run(
-            ['termux-location', '-p', 'gps', '-r', 'once'],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=True
-        )
-        location_data = json.loads(result.stdout)
-        latitude = location_data.get('latitude')
-        longitude = location_data.get('longitude')
-        print(f"[i] GPS location acquired: Lat {latitude}, Lon {longitude}")
-        return latitude, longitude
-    except FileNotFoundError:
-        print("[!] termux-api is not installed or not in PATH. Cannot get GPS location.")
+    with location_lock:
+        lat = location_data['latitude']
+        lon = location_data['longitude']
+        ts = location_data['timestamp']
+
+    # Consider location stale if it's older than 60 seconds
+    if time.time() - ts > 60:
+        print("[!] Stale location data (older than 60s). You may need to wait for a new GPS lock.")
         return None, None
-    except subprocess.TimeoutExpired:
-        print("[!] GPS location request timed out. Make sure GPS is on and you have a clear view of the sky.")
-        return None, None
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-        print(f"[!] Failed to get or parse GPS location: {e}")
-        return None, None
+    
+    if lat and lon:
+        print(f"[i] Using recent GPS location: Lat {lat}, Lon {lon}")
+        return lat, lon
+    
+    print("[!] No GPS location data available from background thread.")
+    return None, None
 
 def print_termux_location_guide():
     """Prints a one-time guide for setting up Termux location services."""
@@ -1416,14 +1437,16 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    location_thread = None  # Initialize variable
     if args.location:
-        # Check if the 'termux-location' command is available in the system's PATH
         if not shutil.which('termux-location'):
-            die("ERROR: The --location flag was used, but 'termux-location' command was not found.\n"
-                "Please install the Termux API tools by running: pkg install termux-api")
+            die("ERROR: --location requires 'termux-api'. Please run: pkg install termux-api")
         else:
-            # If the command exists, show the user the setup guide one time.
             print_termux_location_guide()
+            # Start the background thread
+            print("[*] Starting background GPS polling...")
+            location_thread = threading.Thread(target=location_updater_thread, daemon=True)
+            location_thread.start()
 
     if sys.hexversion < 0x03060F0:
         die("The program requires Python 3.6 and above")
@@ -1482,6 +1505,10 @@ if __name__ == '__main__':
                 else:
                     print("\nAborting…")
                     break
+            finally:
+                if location_thread:
+                    print("[*] Stopping background GPS polling...")
+                    stop_event.set()
 
     if args.iface_down:
         ifaceUp(args.interface, down=True)
