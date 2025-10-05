@@ -1194,8 +1194,8 @@ def auto_attack_mode(args):
             networks = scanner.iw_scanner()
 
             if not networks:
-                print("[-] No WPS networks found. Retrying in 30 seconds...")
-                time.sleep(30)
+                print("[-] No WPS networks found. Retrying in 5 seconds...")
+                time.sleep(5)
                 continue
 
             # Prioritize networks: green, then white
@@ -1220,7 +1220,7 @@ def auto_attack_mode(args):
 
             if not prioritized_targets:
                 print("[i] No new networks to attack. Waiting for new networks to appear...")
-                time.sleep(30)
+                time.sleep(5)
                 continue
 
             # Attack only the first target, then rescan
@@ -1233,7 +1233,7 @@ def auto_attack_mode(args):
             else:
                 print(f"[-] Attack on {target['essid']} failed.")
             # companion.cleanup()
-            time.sleep(5) # Brief pause before rescanning
+            time.sleep(1) # Brief pause before rescanning
 
         except KeyboardInterrupt:
             print("\n[!] Auto-attack mode stopped by user.")
@@ -1288,7 +1288,7 @@ def print_termux_location_guide():
     ---------------------------------------------------------------------
     """
     print(guide_message)
-    time.sleep(5)
+    # time.sleep(5)
 
 def ifaceUp(iface, down=False):
     if down:
