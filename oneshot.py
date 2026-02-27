@@ -1593,6 +1593,9 @@ class Companion:
         print("[{}] [{}] {}".format(level, self.lastPwr, msg))
 
     def cleanup(self):
+        if getattr(self, '_cleaned_up', False):
+            return
+        self._cleaned_up = True
         try:
             print("[*] Cleaning up resources...")
             self.retsock.close()
@@ -1602,7 +1605,6 @@ class Companion:
             os.remove(self.tempconf)
         except (OSError, FileNotFoundError) as e:
             print(f"[!] Error during cleanup: {str(e)}")
-            pass
 
     def __del__(self):
         try:
@@ -1719,15 +1721,21 @@ class WiFiScanner:
             )
 
         cmd = "iw dev {} scan".format(self.interface)
-        proc = subprocess.run(
-            cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            encoding="utf-8",
-            errors="replace",
-        )
-        lines = proc.stdout.splitlines()
+        for _ in range(3):
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                encoding="utf-8",
+                errors="replace",
+            )
+            lines = proc.stdout.splitlines()
+            if any("Device or resource busy" in line for line in lines):
+                print("[!] Interface busy, retrying scan in 2s...")
+                time.sleep(2)
+                continue
+            break
         networks = []
         matchers = {
             re.compile(r"BSS (\S+)( )?\(on \w+\)"): handle_network,
@@ -1737,7 +1745,7 @@ class WiFiScanner:
             re.compile(r"(RSN):\t [*] Version: (\d+)"): handle_securityType,
             re.compile(r"(WPA):\t [*] Version: (\d+)"): handle_securityType,
             re.compile(r"WPS:\t [*] Version: (([0-9]*[.])?[0-9]+)"): handle_wps,
-            re.compile(r" [*] AP setup locked: (0x[0-9]+)"): handle_wpsLocked,
+            re.compile(r" [*] AP setup locked: (0x[0-9a-fA-F]+)"): handle_wpsLocked,
             re.compile(r" [*] Model: (.*)"): handle_model,
             re.compile(r" [*] Model Number: (.*)"): handle_modelNumber,
             re.compile(r" [*] Device name: (.*)"): handle_deviceName,
@@ -1984,7 +1992,7 @@ def auto_attack_mode(args):
             if companion is not None:
                 try:
                     companion.cleanup()
-                except:
+                except Exception:
                     pass
 
             companion = Companion(
@@ -2029,7 +2037,7 @@ def auto_attack_mode(args):
                 print(f"[!] Error during attack: {e}. Recreating Companion instance...")
                 try:
                     companion.cleanup()
-                except:
+                except Exception:
                     pass
                 companion = None
 
@@ -2045,7 +2053,7 @@ def auto_attack_mode(args):
     if companion is not None:
         try:
             companion.cleanup()
-        except:
+        except Exception:
             pass
 
 
