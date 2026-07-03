@@ -16,6 +16,7 @@ from datetime import datetime
 import collections
 import statistics
 import csv
+import shlex
 from pathlib import Path
 from typing import Dict
 import wcwidth
@@ -1304,32 +1305,38 @@ class Companion:
             os.makedirs(self.reports_dir)
         filename = self.reports_dir + "stored"
         dateStr = datetime.now().strftime("%d.%m.%Y %H:%M")
-        with open(filename + ".txt", "a", encoding="utf-8") as file:
-            file.write(f"{dateStr}\nBSSID: {bssid}\nESSID: {essid}\n")
-            file.write(f"WPS PIN: {wps_pin}\nWPA PSK: {wpa_psk}\n")
-            if latitude is not None and longitude is not None:
-                file.write(f"Latitude: {latitude}\nLongitude: {longitude}\n")
-            file.write("\n")
+        try:
+            with open(filename + ".txt", "a", encoding="utf-8") as file:
+                file.write(f"{dateStr}\nBSSID: {bssid}\nESSID: {essid}\n")
+                file.write(f"WPS PIN: {wps_pin}\nWPA PSK: {wpa_psk}\n")
+                if latitude is not None and longitude is not None:
+                    file.write(f"Latitude: {latitude}\nLongitude: {longitude}\n")
+                file.write("\n")
+        except OSError as e:
+            print(f"[!] Failed to write {filename}.txt: {e}")
 
-        writeTableHeader = not os.path.isfile(filename + ".csv")
-        with open(filename + ".csv", "a", newline="", encoding="utf-8") as file:
-            csvWriter = csv.writer(file, delimiter=";", quoting=csv.QUOTE_ALL)
-            if writeTableHeader:
+        try:
+            writeTableHeader = not os.path.isfile(filename + ".csv")
+            with open(filename + ".csv", "a", newline="", encoding="utf-8") as file:
+                csvWriter = csv.writer(file, delimiter=";", quoting=csv.QUOTE_ALL)
+                if writeTableHeader:
+                    csvWriter.writerow(
+                        [
+                            "Date",
+                            "BSSID",
+                            "ESSID",
+                            "WPS PIN",
+                            "WPA PSK",
+                            "Latitude",
+                            "Longitude",
+                        ]
+                    )
                 csvWriter.writerow(
-                    [
-                        "Date",
-                        "BSSID",
-                        "ESSID",
-                        "WPS PIN",
-                        "WPA PSK",
-                        "Latitude",
-                        "Longitude",
-                    ]
+                    [dateStr, bssid, essid, wps_pin, wpa_psk, latitude, longitude]
                 )
-            csvWriter.writerow(
-                [dateStr, bssid, essid, wps_pin, wpa_psk, latitude, longitude]
-            )
-        print(f"[i] Credentials saved to {filename}.txt, {filename}.csv")
+            print(f"[i] Credentials saved to {filename}.txt, {filename}.csv")
+        except OSError as e:
+            print(f"[!] Failed to write {filename}.csv: {e}")
 
     def __savePin(self, bssid, pin):
         filename = self.pixiewps_dir + "{}.run".format(bssid.replace(":", "").upper())
