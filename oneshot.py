@@ -1373,10 +1373,14 @@ class Companion:
                 return
 
             # Fallback: wpa_cli sequence for devices without `cmd wifi`.
+            # wpa_cli wants ssid/psk wrapped in literal double-quotes; quote the
+            # whole double-quoted value so any char (incl. ' or ") stays inert.
+            wpa_essid = shlex.quote(f'"{essid}"')
+            wpa_psk_arg = shlex.quote(f'"{wpa_psk}"')
             wpa_cmd = (
                 "id=$(wpa_cli add_network | tail -n1); "
-                f"wpa_cli set_network $id ssid '\"'{q_essid}'\"'; "
-                f"wpa_cli set_network $id psk '\"'{q_psk}'\"'; "
+                f"wpa_cli set_network $id ssid {wpa_essid}; "
+                f"wpa_cli set_network $id psk {wpa_psk_arg}; "
                 "wpa_cli enable_network $id; "
                 "wpa_cli save_config"
             )
