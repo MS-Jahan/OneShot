@@ -1338,6 +1338,64 @@ class Companion:
         except OSError as e:
             print(f"[!] Failed to write {filename}.csv: {e}")
 
+        self.__addNetworkToDevice(essid, wpa_psk)
+
+    def __addNetworkToDevice(self, essid, wpa_psk):
+        """Best-effort: add a cracked WPA/WPA2 network to a rooted device's
+        saved WiFi so it can connect without manual entry. Never raises."""
+        if not essid or not wpa_psk:
+            return
+        try:
+            root_check = subprocess.run(
+                ["su", "-c", "id"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if root_check.returncode != 0 or "uid=0" not in root_check.stdout:
+                print("[!] Root not available — skipping auto-add to device.")
+                return
+
+            q_essid = shlex.quote(essid)
+            q_psk = shlex.quote(wpa_psk)
+
+            # Primary: Android 10+ single-shot add + connect.
+            connect_cmd = f"cmd wifi connect-network {q_essid} wpa2 {q_psk}"
+            result = subprocess.run(
+                ["su", "-c", connect_cmd],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            out = (result.stdout + result.stderr).lower()
+            if result.returncode == 0 and "fail" not in out and "error" not in out:
+                print(f"[+] Network '{essid}' added to device.")
+                return
+
+            # Fallback: wpa_cli sequence for devices without `cmd wifi`.
+            wpa_cmd = (
+                "id=$(wpa_cli add_network | tail -n1); "
+                f"wpa_cli set_network $id ssid '\"'{q_essid}'\"'; "
+                f"wpa_cli set_network $id psk '\"'{q_psk}'\"'; "
+                "wpa_cli enable_network $id; "
+                "wpa_cli save_config"
+            )
+            result = subprocess.run(
+                ["su", "-c", wpa_cmd],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                print(f"[+] Network '{essid}' added to device (wpa_cli).")
+            else:
+                print(
+                    "[!] Could not add network to device: "
+                    f"{(result.stderr or result.stdout).strip()}"
+                )
+        except Exception as e:
+            print(f"[!] Auto-add to device failed: {e}")
+
     def __savePin(self, bssid, pin):
         filename = self.pixiewps_dir + "{}.run".format(bssid.replace(":", "").upper())
         with open(filename, "w") as file:
