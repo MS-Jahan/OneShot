@@ -16,6 +16,7 @@ from datetime import datetime
 import collections
 import statistics
 import csv
+import shlex
 from pathlib import Path
 from typing import Dict
 import wcwidth
@@ -1304,32 +1305,100 @@ class Companion:
             os.makedirs(self.reports_dir)
         filename = self.reports_dir + "stored"
         dateStr = datetime.now().strftime("%d.%m.%Y %H:%M")
-        with open(filename + ".txt", "a", encoding="utf-8") as file:
-            file.write(f"{dateStr}\nBSSID: {bssid}\nESSID: {essid}\n")
-            file.write(f"WPS PIN: {wps_pin}\nWPA PSK: {wpa_psk}\n")
-            if latitude is not None and longitude is not None:
-                file.write(f"Latitude: {latitude}\nLongitude: {longitude}\n")
-            file.write("\n")
+        try:
+            with open(filename + ".txt", "a", encoding="utf-8") as file:
+                file.write(f"{dateStr}\nBSSID: {bssid}\nESSID: {essid}\n")
+                file.write(f"WPS PIN: {wps_pin}\nWPA PSK: {wpa_psk}\n")
+                if latitude is not None and longitude is not None:
+                    file.write(f"Latitude: {latitude}\nLongitude: {longitude}\n")
+                file.write("\n")
+        except OSError as e:
+            print(f"[!] Failed to write {filename}.txt: {e}")
 
-        writeTableHeader = not os.path.isfile(filename + ".csv")
-        with open(filename + ".csv", "a", newline="", encoding="utf-8") as file:
-            csvWriter = csv.writer(file, delimiter=";", quoting=csv.QUOTE_ALL)
-            if writeTableHeader:
+        try:
+            writeTableHeader = not os.path.isfile(filename + ".csv")
+            with open(filename + ".csv", "a", newline="", encoding="utf-8") as file:
+                csvWriter = csv.writer(file, delimiter=";", quoting=csv.QUOTE_ALL)
+                if writeTableHeader:
+                    csvWriter.writerow(
+                        [
+                            "Date",
+                            "BSSID",
+                            "ESSID",
+                            "WPS PIN",
+                            "WPA PSK",
+                            "Latitude",
+                            "Longitude",
+                        ]
+                    )
                 csvWriter.writerow(
-                    [
-                        "Date",
-                        "BSSID",
-                        "ESSID",
-                        "WPS PIN",
-                        "WPA PSK",
-                        "Latitude",
-                        "Longitude",
-                    ]
+                    [dateStr, bssid, essid, wps_pin, wpa_psk, latitude, longitude]
                 )
-            csvWriter.writerow(
-                [dateStr, bssid, essid, wps_pin, wpa_psk, latitude, longitude]
+            print(f"[i] Credentials saved to {filename}.txt, {filename}.csv")
+        except OSError as e:
+            print(f"[!] Failed to write {filename}.csv: {e}")
+
+        self.__addNetworkToDevice(essid, wpa_psk)
+
+    def __addNetworkToDevice(self, essid, wpa_psk):
+        """Best-effort: add a cracked WPA/WPA2 network to a rooted device's
+        saved WiFi so it can connect without manual entry. Never raises."""
+        if not essid or not wpa_psk:
+            return
+        try:
+            root_check = subprocess.run(
+                ["su", "-c", "id"],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
-        print(f"[i] Credentials saved to {filename}.txt, {filename}.csv")
+            if root_check.returncode != 0 or "uid=0" not in root_check.stdout:
+                print("[!] Root not available — skipping auto-add to device.")
+                return
+
+            q_essid = shlex.quote(essid)
+            q_psk = shlex.quote(wpa_psk)
+
+            # Primary: Android 10+ single-shot add + connect.
+            connect_cmd = f"cmd wifi connect-network {q_essid} wpa2 {q_psk}"
+            result = subprocess.run(
+                ["su", "-c", connect_cmd],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            out = (result.stdout + result.stderr).lower()
+            if result.returncode == 0 and "fail" not in out and "error" not in out:
+                print(f"[+] Network '{essid}' added to device.")
+                return
+
+            # Fallback: wpa_cli sequence for devices without `cmd wifi`.
+            # wpa_cli wants ssid/psk wrapped in literal double-quotes; quote the
+            # whole double-quoted value so any char (incl. ' or ") stays inert.
+            wpa_essid = shlex.quote(f'"{essid}"')
+            wpa_psk_arg = shlex.quote(f'"{wpa_psk}"')
+            wpa_cmd = (
+                "id=$(wpa_cli add_network | tail -n1); "
+                f"wpa_cli set_network $id ssid {wpa_essid}; "
+                f"wpa_cli set_network $id psk {wpa_psk_arg}; "
+                "wpa_cli enable_network $id; "
+                "wpa_cli save_config"
+            )
+            result = subprocess.run(
+                ["su", "-c", wpa_cmd],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                print(f"[+] Network '{essid}' added to device (wpa_cli).")
+            else:
+                print(
+                    "[!] Could not add network to device: "
+                    f"{(result.stderr or result.stdout).strip()}"
+                )
+        except Exception as e:
+            print(f"[!] Auto-add to device failed: {e}")
 
     def __savePin(self, bssid, pin):
         filename = self.pixiewps_dir + "{}.run".format(bssid.replace(":", "").upper())
