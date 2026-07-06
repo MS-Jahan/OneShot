@@ -1121,6 +1121,47 @@ def add_network_to_device(essid, wpa_psk):
         print(f"[!] Auto-add to device failed: {e}")
 
 
+def sync_stored_to_device(reports_dir):
+    """Read <reports_dir>/stored.csv and inject every saved network into the
+    device that isn't already present. Skips rows with empty ESSID or WPA PSK.
+    Never raises."""
+    filename = reports_dir + "stored.csv"
+    if not os.path.isfile(filename):
+        print(f"[!] No stored credentials to sync ({filename} missing).")
+        return
+    processed = 0
+    skipped = 0
+    try:
+        with open(
+            filename, "r", newline="", encoding="utf-8", errors="replace"
+        ) as file:
+            csvReader = csv.reader(file, delimiter=";", quoting=csv.QUOTE_ALL)
+            try:
+                next(csvReader)  # skip header row
+            except StopIteration:
+                print("[i] stored.csv is empty, nothing to sync.")
+                return
+            for row in csvReader:
+                if len(row) < 5:
+                    continue
+                # columns: Date, BSSID, ESSID, WPS PIN, WPA PSK, [Lat, Lon]
+                essid = row[2]
+                wpa_psk = row[4]
+                if not essid or not wpa_psk:
+                    skipped += 1
+                    continue
+                # add_network_to_device dedups internally via
+                # _device_has_network, so re-running sync is idempotent.
+                add_network_to_device(essid, wpa_psk)
+                processed += 1
+        print(
+            f"[i] Sync complete: {processed} processed, "
+            f"{skipped} skipped (missing ESSID/PSK)."
+        )
+    except OSError as e:
+        print(f"[!] Failed to read {filename}: {e}")
+
+
 class Companion:
     """Main application part"""
 
@@ -2315,6 +2356,13 @@ if __name__ == "__main__":
         help="Write credentials to the file on success",
     )
     parser.add_argument(
+        "--sync-to-device",
+        action="store_true",
+        default=False,
+        help="Import all networks from reports/stored.csv into the device's "
+        "saved WiFi (rooted only), then exit. Idempotent.",
+    )
+    parser.add_argument(
         "--iface-down",
         action="store_true",
         help="Down network interface when the work is finished",
@@ -2355,6 +2403,14 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
 
     args = parser.parse_args()
+
+    if getattr(args, "sync_to_device", False):
+        # One-shot CSV -> device import, then exit without scanning.
+        reports_dir = (
+            os.path.dirname(os.path.realpath(__file__)) + "/reports/"
+        )
+        sync_stored_to_device(reports_dir)
+        sys.exit(0)
 
     location_thread = None
     if args.location:
