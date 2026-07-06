@@ -1042,6 +1042,126 @@ class BruteforceStatus:
         self.__init__()
 
 
+def _device_has_network(essid):
+    """Return True if a network with this SSID is already saved in the
+    device's wpa_supplicant. Returns False on any error (treat as 'not
+    present' so the caller attempts the add). Never raises."""
+    try:
+        result = subprocess.run(
+            ["su", "-c", "wpa_cli list_networks"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return False
+        # list_networks prints: network_id / ssid / bssid / flags (tab-separated).
+        # Match the ssid column exactly so 'Net' doesn't false-match 'Netgear'.
+        for line in result.stdout.splitlines():
+            cols = line.split("\t")
+            if len(cols) >= 2 and cols[1] == essid:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def add_network_to_device(essid, wpa_psk):
+    """Best-effort: save a cracked WPA/WPA2 network to a rooted device's
+    saved WiFi WITHOUT auto-connecting. Network is added disabled so the
+    user must enable it manually. Never raises."""
+    if not essid or not wpa_psk:
+        return
+    try:
+        root_check = subprocess.run(
+            ["su", "-c", "id"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if root_check.returncode != 0 or "uid=0" not in root_check.stdout:
+            print("[!] Root not available — skipping auto-add to device.")
+            return
+
+        if _device_has_network(essid):
+            print(f"[i] Network '{essid}' already saved on device, skipping.")
+            return
+
+        # wpa_cli wants ssid/psk wrapped in literal double-quotes; quote the
+        # whole double-quoted value so any char (incl. ' or ") stays inert.
+        wpa_essid = shlex.quote(f'"{essid}"')
+        wpa_psk_arg = shlex.quote(f'"{wpa_psk}"')
+        # add_network + configure + DISABLE + save_config. disabled=1 means the
+        # network is saved to wpa_supplicant.conf but will not be selected for
+        # auto-connect until the user enables it.
+        wpa_cmd = (
+            "id=$(wpa_cli add_network | tail -n1); "
+            f"wpa_cli set_network $id ssid {wpa_essid}; "
+            f"wpa_cli set_network $id psk {wpa_psk_arg}; "
+            "wpa_cli set_network $id disabled 1; "
+            "wpa_cli save_config"
+        )
+        result = subprocess.run(
+            ["su", "-c", wpa_cmd],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            print(
+                f"[+] Network '{essid}' saved to device "
+                "(disabled, no auto-connect)."
+            )
+        else:
+            print(
+                "[!] Could not add network to device: "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
+    except Exception as e:
+        print(f"[!] Auto-add to device failed: {e}")
+
+
+def sync_stored_to_device(reports_dir):
+    """Read <reports_dir>/stored.csv and inject every saved network into the
+    device that isn't already present. Skips rows with empty ESSID or WPA PSK.
+    Never raises."""
+    filename = reports_dir + "stored.csv"
+    if not os.path.isfile(filename):
+        print(f"[!] No stored credentials to sync ({filename} missing).")
+        return
+    processed = 0
+    skipped = 0
+    try:
+        with open(
+            filename, "r", newline="", encoding="utf-8", errors="replace"
+        ) as file:
+            csvReader = csv.reader(file, delimiter=";", quoting=csv.QUOTE_ALL)
+            try:
+                next(csvReader)  # skip header row
+            except StopIteration:
+                print("[i] stored.csv is empty, nothing to sync.")
+                return
+            for row in csvReader:
+                if len(row) < 5:
+                    continue
+                # columns: Date, BSSID, ESSID, WPS PIN, WPA PSK, [Lat, Lon]
+                essid = row[2]
+                wpa_psk = row[4]
+                if not essid or not wpa_psk:
+                    skipped += 1
+                    continue
+                # add_network_to_device dedups internally via
+                # _device_has_network, so re-running sync is idempotent.
+                add_network_to_device(essid, wpa_psk)
+                processed += 1
+        print(
+            f"[i] Sync complete: {processed} processed, "
+            f"{skipped} skipped (missing ESSID/PSK)."
+        )
+    except OSError as e:
+        print(f"[!] Failed to read {filename}: {e}")
+
+
 class Companion:
     """Main application part"""
 
@@ -1338,67 +1458,7 @@ class Companion:
         except OSError as e:
             print(f"[!] Failed to write {filename}.csv: {e}")
 
-        self.__addNetworkToDevice(essid, wpa_psk)
-
-    def __addNetworkToDevice(self, essid, wpa_psk):
-        """Best-effort: add a cracked WPA/WPA2 network to a rooted device's
-        saved WiFi so it can connect without manual entry. Never raises."""
-        if not essid or not wpa_psk:
-            return
-        try:
-            root_check = subprocess.run(
-                ["su", "-c", "id"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if root_check.returncode != 0 or "uid=0" not in root_check.stdout:
-                print("[!] Root not available — skipping auto-add to device.")
-                return
-
-            q_essid = shlex.quote(essid)
-            q_psk = shlex.quote(wpa_psk)
-
-            # Primary: Android 10+ single-shot add + connect.
-            connect_cmd = f"cmd wifi connect-network {q_essid} wpa2 {q_psk}"
-            result = subprocess.run(
-                ["su", "-c", connect_cmd],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            out = (result.stdout + result.stderr).lower()
-            if result.returncode == 0 and "fail" not in out and "error" not in out:
-                print(f"[+] Network '{essid}' added to device.")
-                return
-
-            # Fallback: wpa_cli sequence for devices without `cmd wifi`.
-            # wpa_cli wants ssid/psk wrapped in literal double-quotes; quote the
-            # whole double-quoted value so any char (incl. ' or ") stays inert.
-            wpa_essid = shlex.quote(f'"{essid}"')
-            wpa_psk_arg = shlex.quote(f'"{wpa_psk}"')
-            wpa_cmd = (
-                "id=$(wpa_cli add_network | tail -n1); "
-                f"wpa_cli set_network $id ssid {wpa_essid}; "
-                f"wpa_cli set_network $id psk {wpa_psk_arg}; "
-                "wpa_cli enable_network $id; "
-                "wpa_cli save_config"
-            )
-            result = subprocess.run(
-                ["su", "-c", wpa_cmd],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0:
-                print(f"[+] Network '{essid}' added to device (wpa_cli).")
-            else:
-                print(
-                    "[!] Could not add network to device: "
-                    f"{(result.stderr or result.stdout).strip()}"
-                )
-        except Exception as e:
-            print(f"[!] Auto-add to device failed: {e}")
+        add_network_to_device(essid, wpa_psk)
 
     def __savePin(self, bssid, pin):
         filename = self.pixiewps_dir + "{}.run".format(bssid.replace(":", "").upper())
@@ -2296,6 +2356,13 @@ if __name__ == "__main__":
         help="Write credentials to the file on success",
     )
     parser.add_argument(
+        "--sync-to-device",
+        action="store_true",
+        default=False,
+        help="Import all networks from reports/stored.csv into the device's "
+        "saved WiFi (rooted only), then exit. Idempotent.",
+    )
+    parser.add_argument(
         "--iface-down",
         action="store_true",
         help="Down network interface when the work is finished",
@@ -2336,6 +2403,14 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
 
     args = parser.parse_args()
+
+    if getattr(args, "sync_to_device", False):
+        # One-shot CSV -> device import, then exit without scanning.
+        reports_dir = (
+            os.path.dirname(os.path.realpath(__file__)) + "/reports/"
+        )
+        sync_stored_to_device(reports_dir)
+        sys.exit(0)
 
     location_thread = None
     if args.location:
